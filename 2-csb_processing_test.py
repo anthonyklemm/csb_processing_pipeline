@@ -25,6 +25,7 @@ from shapely.geometry import shape, LineString
 from shapely.validation import make_valid
 from rasterio.transform import from_origin
 from rasterio.warp import calculate_default_transform, reproject, Resampling
+from datetime import datetime
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -58,9 +59,11 @@ def loadCSB():
     df1 = gpd.read_file(csb)  # read in CSB data in CSV
     df1 = df1.astype({'depth': 'float'})
     df2 = df1[(df1['depth'] > 0.5) & (df1['depth'] < 1000)]
-    df2 = df2.astype({'time':'datetime64[ns]'}, errors='ignore')
+    df2 = df2.astype({'time': 'datetime64[ns]'}, errors='ignore')
     df2 = df2.dropna(subset=['time'])
-    df2 = df2[(df2['time'] > '2014') & (df2['time'] < '2026')]
+    lower_bound = pd.to_datetime("2014")
+    upper_bound = pd.to_datetime(str(datetime.now().year + 1))
+    df2 = df2[(df2['time'] > lower_bound) & (df2['time'] < upper_bound)]
     df2 = df2.drop_duplicates(subset=['lon', 'lat', 'depth', 'time', 'unique_id'])
     gdf = gpd.GeoDataFrame(df2, geometry=gpd.points_from_xy(df2.lon, df2.lat))
     gdf = gdf.set_crs(4326, allow_override=True)
