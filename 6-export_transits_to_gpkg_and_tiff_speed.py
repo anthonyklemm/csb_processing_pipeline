@@ -5,13 +5,6 @@ Created on Wed Feb 12 16:23:23 2025
 @author: Anthony.R.Klemm
 """
 
-# -*- coding: utf-8 -*-
-"""
-Created on Fri Feb  7 11:48:51 2025
-
-@author: Anthony.R.Klemm
-"""
-
 import os
 import duckdb
 import pandas as pd
