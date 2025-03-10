@@ -5,12 +5,6 @@ Created on Tue Feb 11 14:09:05 2025
 @author: Anthony.R.Klemm
 """
 
-# -*- coding: utf-8 -*-
-"""
-Created on Thu Feb  6 15:23:35 2025
-
-@author: Anthony.R.Klemm
-
 This script:
   1. Gets a bounding box from a BlueTopo tile,
   2. Queries DuckDB for CSB points within that bbox,
