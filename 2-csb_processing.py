@@ -245,71 +245,6 @@ def reproject_raster(input_raster, output_raster, dst_crs):
                 dst_crs=dst_crs,
                 resampling=Resampling.nearest)
 
-# def reproject_tiff(input_dir, output_dir, target_epsg='EPSG:3395'):
-#     if not os.path.exists(output_dir):
-#         os.makedirs(output_dir)
-
-#     for root, dirs, files in os.walk(input_dir):
-#         for file in files:
-#             if file.endswith(".tiff"):
-#                 input_path = os.path.join(root, file)
-#                 relative_path = os.path.relpath(root, input_dir)
-#                 base_filename, file_extension = os.path.splitext(file)
-#                 new_filename = f"{base_filename}_reprojected{file_extension}"
-#                 output_path = os.path.join(output_dir, relative_path, new_filename)
-                
-#                 output_folder = os.path.dirname(output_path)
-#                 if not os.path.exists(output_folder):
-#                     os.makedirs(output_folder)
-                    
-#                 command = [
-#                     'gdalwarp', '-t_srs', target_epsg,
-#                     input_path, output_path
-#                 ]
-#                 #print(f"Reprojecting {input_path} to {output_path}")
-#                 subprocess.run(command, check=True)
-
-# def mosaic_tiles(tiles_dir):
-#     # Directory where the tiles are stored is now passed as a parameter
-#     mosaic_raster_path = os.path.join(tiles_dir, 'merged_tiles.tif')
-
-#     # Reproject the original bluetopo tiles using gdal and name them *_reprojected.tiff
-#     reproject_tiff(tiles_dir, tiles_dir)
-
-#     # List to store the opened rasters
-#     raster_list = []
-
-#     # Recursively search for geotiff files within the tiles_dir and open them
-#     for root, dirs, files in os.walk(tiles_dir):
-#         for file in files:
-#             if file.endswith('_reprojected.tiff'):
-#                 raster_path = os.path.join(root, file)
-#                 src = rasterio.open(raster_path)
-#                 raster_list.append(src)
-
-#     # Merge the rasters using all bands
-#     merged_raster, out_transform = merge(raster_list)
-
-#     # Write the merged raster with all bands
-#     out_meta = src.meta.copy()
-#     out_meta.update({
-#         "driver": "GTiff",
-#         "height": merged_raster.shape[1],
-#         "width": merged_raster.shape[2],
-#         "transform": out_transform,
-#         "count": src.count  # Ensure all bands are included
-#     })
-
-#     with rasterio.open(mosaic_raster_path, "w", **out_meta) as dest:
-#         for i in range(1, src.count + 1):
-#             dest.write(merged_raster[i - 1, :, :], i)
-
-#     # Close the opened rasters
-#     for src in raster_list:
-#         src.close()
-
-#     return mosaic_raster_path
-
 def fetch_tide_data(station_id, start_date, end_date, product, interval=None, attempt_great_lakes=False):
     base_url = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
     params = {
@@ -351,44 +286,6 @@ def fetch_tide_data(station_id, start_date, end_date, product, interval=None, at
 
     print(f"Pulled {data_type} for station {station_id} from {start_date} to {end_date}")
     return df
-
-
-# def fetch_tide_data(station_id, start_date, end_date, product, interval=None, attempt_great_lakes=False):
-#     base_url = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
-#     params = {
-#         "begin_date": start_date,
-#         "end_date": end_date,
-#         "station": station_id,
-#         "datum": "MLLW" if not attempt_great_lakes else "LWD",
-#         "time_zone": "gmt",
-#         "units": "metric",
-#         "format": "json",
-#         "product": product
-#     }
-
-#     if interval:
-#         params["interval"] = interval
-
-#     request_url = requests.Request('GET', base_url, params=params).prepare().url
-#     print(f"Requesting URL: {request_url}")
-
-#     response = requests.get(base_url, params=params)
-#     data = response.json()
-
-#     if 'predictions' in data:
-#         df = pd.json_normalize(data['predictions'])
-#         data_type = "predicted data"
-#     elif 'data' in data:
-#         df = pd.json_normalize(data['data'])
-#         data_type = "observed data"
-#     else:
-#         print(f"No data returned for URL: {request_url}")
-#         return pd.DataFrame()
-
-#     df['t'] = pd.to_datetime(df['t'])
-#     df['v'] = df['v'].astype(float)
-#     print(f"Pulled {data_type} for station {station_id} from {start_date} to {end_date}")
-#     return df
 
 def check_for_gaps(dataframe, max_gap_duration='1h'):
     gaps = dataframe['t'].diff() > pd.Timedelta(max_gap_duration)
