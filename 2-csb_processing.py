@@ -50,24 +50,34 @@ MASTER_OFFSET_FILE = os.path.join(output_dir, "master_offsets.csv")
 
 pd.set_option('display.max_columns', None)
 
-# ---------------------------
-# BAG / BlueTopo functions
-# ---------------------------
 
 def loadCSB():
     print('*****Reading CSB input csv file*****')
-    df1 = gpd.read_file(csb)  # read in CSB data in CSV
-    df1 = df1.astype({'depth': 'float'})
-    df2 = df1[(df1['depth'] > 0.5) & (df1['depth'] < 1000)]
-    df2 = df2.astype({'time': 'datetime64[ns]'}, errors='ignore')
-    df2 = df2.dropna(subset=['time'])
+    
+    df = pd.read_csv(csb)
+    
+    # Convert 'depth' to numeric and 'time' to datetime; invalid parsing results in NaN
+    df['depth'] = pd.to_numeric(df['depth'], errors='coerce')
+    df['time'] = pd.to_datetime(df['time'], errors='coerce')
+    
+    # Drop rows where 'time' or 'depth' conversion failed
+    df = df.dropna(subset=['time', 'depth'])
+    
+    # Filter rows based on depth criteria
+    df = df[(df['depth'] > 0.5) & (df['depth'] < 1000)]
+    
+    # Define time bounds and filter by time
     lower_bound = pd.to_datetime("2014")
     upper_bound = pd.to_datetime(str(datetime.now().year + 1))
-    df2 = df2[(df2['time'] > lower_bound) & (df2['time'] < upper_bound)]
-    df2 = df2.drop_duplicates(subset=['lon', 'lat', 'depth', 'time', 'unique_id'])
-    gdf = gpd.GeoDataFrame(df2, geometry=gpd.points_from_xy(df2.lon, df2.lat))
-    gdf = gdf.set_crs(4326, allow_override=True)
+    df = df[(df['time'] > lower_bound) & (df['time'] < upper_bound)]
+    
+    # Drop duplicate rows based on key columns
+    df = df.drop_duplicates(subset=['lon', 'lat', 'depth', 'time', 'unique_id'])
+    
+    # Create a GeoDataFrame using lon/lat columns
+    gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon, df.lat), crs="EPSG:4326")
     return gdf
+
 
 def reproject_tiff(input_dir, output_dir, target_epsg='EPSG:3395'):
     """
@@ -245,6 +255,7 @@ def reproject_raster(input_raster, output_raster, dst_crs):
                 dst_crs=dst_crs,
                 resampling=Resampling.nearest)
 
+
 def fetch_tide_data(station_id, start_date, end_date, product, interval=None, attempt_great_lakes=False):
     base_url = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
     params = {
@@ -286,6 +297,7 @@ def fetch_tide_data(station_id, start_date, end_date, product, interval=None, at
 
     print(f"Pulled {data_type} for station {station_id} from {start_date} to {end_date}")
     return df
+
 
 def check_for_gaps(dataframe, max_gap_duration='1h'):
     gaps = dataframe['t'].diff() > pd.Timedelta(max_gap_duration)
@@ -535,24 +547,24 @@ def BAGextract():
 
     return output_raster_wgs84, bathy_polygon_shp
 
-def get_raster_values(x, y, raster):
-    ds = gdal.Open(raster)
-    gt = ds.GetGeoTransform()
-    nodata = [ds.GetRasterBand(i + 1).GetNoDataValue() for i in range(ds.RasterCount)]
+# def get_raster_values(x, y, raster):
+#     ds = gdal.Open(raster)
+#     gt = ds.GetGeoTransform()
+#     nodata = [ds.GetRasterBand(i + 1).GetNoDataValue() for i in range(ds.RasterCount)]
 
-    px = int((x - gt[0]) / gt[1])
-    py = int((y - gt[3]) / gt[5])
+#     px = int((x - gt[0]) / gt[1])
+#     py = int((y - gt[3]) / gt[5])
 
-    if px < 0 or py < 0 or px >= ds.RasterXSize or py >= ds.RasterYSize:
-        return [np.nan] * ds.RasterCount
+#     if px < 0 or py < 0 or px >= ds.RasterXSize or py >= ds.RasterYSize:
+#         return [np.nan] * ds.RasterCount
 
-    values = []
-    for i in range(ds.RasterCount):
-        band = ds.GetRasterBand(i + 1)
-        value = band.ReadAsArray(px, py, 1, 1)[0][0]
-        values.append(value if value != nodata[i] else np.nan)
+#     values = []
+#     for i in range(ds.RasterCount):
+#         band = ds.GetRasterBand(i + 1)
+#         value = band.ReadAsArray(px, py, 1, 1)[0][0]
+#         values.append(value if value != nodata[i] else np.nan)
 
-    return values
+#     return values
 
 def read_master_offsets():
     """Reads the master offsets from a CSV file."""
@@ -599,62 +611,133 @@ def update_master_offsets(unique_id, platform_name, new_offset, std_dev, date_ra
     except Exception as e:
         print(f"Failed to update master offsets: {e}")
 
+
+def get_raster_values_vectorized(coords, raster_path, batch_size=100000):
+    """
+    Given a list of (x, y) coordinate pairs and a raster file path,
+    returns a list of lists, each containing the pixel values from
+    all bands at that coordinate.
+    
+    If the number of coordinates exceeds batch_size, processing is done in batches.
+    Pixels with nodata values are replaced with np.nan.
+    """
+    all_samples = []
+    
+    with rasterio.open(raster_path) as src:
+        nodata = src.nodatavals  # Tuple of nodata values for each band
+        
+        # Process in batches if necessary to manage memory usage
+        if len(coords) > batch_size:
+            for i in range(0, len(coords), batch_size):
+                batch_coords = coords[i:i+batch_size]
+                batch_samples = list(src.sample(batch_coords))
+                all_samples.extend(batch_samples)
+        else:
+            all_samples = list(src.sample(coords))
+    
+    # Process the samples to replace nodata values with np.nan
+    processed_samples = []
+    for sample in all_samples:
+        processed = []
+        for i, val in enumerate(sample):
+            if nodata[i] is not None and val == nodata[i]:
+                processed.append(np.nan)
+            else:
+                processed.append(val)
+        processed_samples.append(processed)
+        
+    return processed_samples
+        
+
 def derive_draft():
     output_raster, raster_boundary_shp = BAGextract()
     csb_corr = tides()
 
+    # Read and fix geometries in the raster boundary and CSB data
     raster_boundary = gpd.read_file(raster_boundary_shp)
-    raster_boundary['geometry'] = raster_boundary['geometry'].apply(lambda geom: geom if geom.is_valid else geom.buffer(0))
-    csb_corr['geometry'] = csb_corr['geometry'].apply(lambda geom: geom if geom.is_valid else geom.buffer(0))
+    raster_boundary['geometry'] = raster_boundary['geometry'].apply(
+        lambda geom: geom if geom.is_valid else geom.buffer(0)
+    )
+    csb_corr['geometry'] = csb_corr['geometry'].apply(
+        lambda geom: geom if geom.is_valid else geom.buffer(0)
+    )
     csb_corr['row_id'] = range(len(csb_corr))
+    
+    # Compute the unary union of the raster boundary geometries once
+    boundary_union = raster_boundary.geometry.unary_union
+    
+    # Get the bounding box of the boundary_union: (minx, miny, maxx, maxy)
+    bbox = boundary_union.bounds
+    
+    # Use the spatial index to find candidate points that intersect the bbox
+    possible_matches_index = csb_corr.sindex.query(boundary_union, predicate="intersects")
+    possible_matches = csb_corr.iloc[possible_matches_index]
+    
+    # Now apply the precise .within() filter on this subset
+    csb_corr_subset = possible_matches[possible_matches.geometry.within(boundary_union)]
 
-    csb_corr_subset = csb_corr[csb_corr.geometry.within(raster_boundary.geometry.unary_union)]
-    sampled_csb_corr_subset = pd.DataFrame()
+    # Instead of sampling 1000 points per vessel, use all points.
+    sampled_csb_corr_subset = csb_corr_subset.copy()
+    
+    # Compute date ranges for each vessel (unique_id) using all available points.
     date_ranges = {}
-
     for name, group in csb_corr_subset.groupby('unique_id'):
-        sampled_group = group.sample(n=1000) if len(group) > 1000 else group
-        sampled_csb_corr_subset = pd.concat([sampled_csb_corr_subset, sampled_group], ignore_index=True)
-        sampled_group['time'] = pd.to_datetime(sampled_group['time'])
-        min_timestamp = sampled_group['time'].min()
-        max_timestamp = sampled_group['time'].max()
-        date_ranges[name] = (min_timestamp.strftime('%Y%m%d'), max_timestamp.strftime('%Y%m%d')) if not pd.isnull(min_timestamp) and not pd.isnull(max_timestamp) else ("19700101", "19700101")
+        # Ensure time is in datetime format.
+        group['time'] = pd.to_datetime(group['time'])
+        min_timestamp = group['time'].min()
+        max_timestamp = group['time'].max()
+        if pd.notnull(min_timestamp) and pd.notnull(max_timestamp):
+            date_ranges[name] = (min_timestamp.strftime('%Y%m%d'), max_timestamp.strftime('%Y%m%d'))
+        else:
+            date_ranges[name] = ("19700101", "19700101")
 
+    # Use the new vectorized raster sampling function over all points.
     try:
-        sampled_csb_corr_subset[['Raster_Value', 'Uncertainty_Value']] = pd.DataFrame(
-            sampled_csb_corr_subset.apply(
-                lambda row: get_raster_values(row.geometry.x, row.geometry.y, output_raster), axis=1
-            ).tolist(), index=sampled_csb_corr_subset.index
-        )
+        # Extract (x, y) coordinates from the GeoDataFrame.
+        coords = [(geom.x, geom.y) for geom in sampled_csb_corr_subset.geometry]
+        # Get raster values (supports batching if needed).
+        raster_samples = get_raster_values_vectorized(coords, output_raster)
+        # Assuming the raster has two bands: assign first as Raster_Value and second as Uncertainty_Value.
+        sampled_csb_corr_subset['Raster_Value'] = [vals[0] for vals in raster_samples]
+        sampled_csb_corr_subset['Uncertainty_Value'] = [
+            vals[1] if len(vals) > 1 else np.nan for vals in raster_samples
+        ]
     except KeyError as e:
         print(f"KeyError encountered during selection of Raster_Value from reference bathy: {e}")
     except Exception as e:
         print(f"Unexpected error encountered during selection of Raster_Value from reference bathy: {e}")
 
+    # Merge the new raster values back into the main CSB dataframe.
     try:
-        csb_corr = csb_corr.merge(sampled_csb_corr_subset[['row_id', 'Raster_Value', 'Uncertainty_Value']], on='row_id', how='left')
+        csb_corr = csb_corr.merge(
+            sampled_csb_corr_subset[['row_id', 'Raster_Value', 'Uncertainty_Value']],
+            on='row_id', how='left'
+        )
     except KeyError as e:
-        print(f'KeyError encountered during merging of sampled_csb_corr_subset and csb_corr: {e}')
+        print(f"KeyError encountered during merging: {e}")
     except Exception as e:
-        print(f'Unexpected error encountered during merging of sampled_csb_corr_subset and csb_corr: {e}')
+        print(f"Unexpected error encountered during merging: {e}")
 
+    # Filter based on uncertainty threshold.
     filtered_csb_corr = csb_corr[csb_corr['Uncertainty_Value'] < 4]
 
+    # Calculate the tide correction difference.
     try:
         if 'Raster_Value' in filtered_csb_corr.columns and 'depth_new' in filtered_csb_corr.columns:
             filtered_csb_corr['diff'] = filtered_csb_corr['depth_new'] - (filtered_csb_corr['Raster_Value'] * -1)
     except KeyError as e:
-        print(f'KeyError encountered calculating csb_corr[diff] field: {e}')
+        print(f"KeyError encountered calculating diff: {e}")
     except Exception as e:
-        print(f'Unexpected error encountered calculating csb_corr[diff] field: {e}')
+        print(f"Unexpected error encountered calculating diff: {e}")
 
+    # Aggregate differences by vessel (unique_id).
     try:
         if 'diff' in filtered_csb_corr.columns:
             out = filtered_csb_corr.groupby('unique_id')['diff'].agg(['mean', 'std', 'count']).reset_index()
     except KeyError as e:
-        print(f'KeyError encountered creating out dataframe: {e}')
+        print(f"KeyError encountered creating aggregation dataframe: {e}")
     except Exception as e:
-        print(f'Unexpected error encountered creating out dataframe: {e}')
+        print(f"Unexpected error encountered creating aggregation dataframe: {e}")
 
     if 'out' in locals():
         out.loc[:, 'mean'] = out['mean'].fillna(0)
