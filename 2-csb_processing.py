@@ -38,6 +38,8 @@ from skimage.morphology import binary_dilation, binary_erosion
 import shutil
 import glob
 import subprocess
+import duckdb
+
 
 # Global variables
 title = ""
@@ -78,6 +80,101 @@ def loadCSB():
     gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon, df.lat), crs="EPSG:4326")
     return gdf
 
+def insert_into_duckdb(gdf, duckdb_path):
+    """
+    Inserts (or appends) the processed GeoDataFrame into a DuckDB table.
+    The geometry is converted to WKB and stored as a BLOB.
+    """
+    # Ensure the directory for the DuckDB file exists.
+    duckdb_dir = os.path.dirname(duckdb_path)
+    if not os.path.exists(duckdb_dir):
+        os.makedirs(duckdb_dir, exist_ok=True)
+
+    # Make a copy and convert geometry to WKB
+    df = gdf.copy()
+    if 'geometry' in df.columns:
+        df['wkb_geom'] = df['geometry'].apply(lambda geom: geom.wkb if geom is not None else None)
+        df = df.drop(columns='geometry')
+    else:
+        df['wkb_geom'] = None
+
+    # Explicitly select only the desired columns to match the table schema (18 columns)
+    desired_columns = [
+        "ControlStn", "Raster_Value", "Uncertainty_Value", "accuracy_score",
+        "date_range", "depth_new", "depth_old", "depthfinal", "lat", "lon",
+        "offset_value", "platform_name_x", "provider", "std_dev", "tile_name",
+        "time", "unique_id", "wkb_geom"
+    ]
+    df = df[desired_columns]
+
+    try:
+        con = duckdb.connect(duckdb_path)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS csb (
+                ControlStn VARCHAR,
+                Raster_Value DOUBLE,
+                Uncertainty_Value DOUBLE,
+                accuracy_score DOUBLE,
+                date_range VARCHAR,
+                depth_new DOUBLE,
+                depth_old DOUBLE,
+                depthfinal DOUBLE,
+                lat FLOAT,
+                lon FLOAT,
+                offset_value DOUBLE,
+                platform_name_x VARCHAR,
+                provider VARCHAR,
+                std_dev DOUBLE,
+                tile_name VARCHAR,
+                time VARCHAR,
+                unique_id VARCHAR,
+                wkb_geom BLOB
+            )
+        """)
+        con.register("temp_df", df)
+        con.execute("INSERT INTO csb SELECT * FROM temp_df")
+        con.unregister("temp_df")
+        con.close()
+        print(f"Data inserted into DuckDB table at {duckdb_path}.")
+    except Exception as e:
+        print(f"Error inserting into DuckDB: {e}")
+
+
+        
+def draft_corr():
+    csb_corr = derive_draft()
+    master_offsets = read_master_offsets()
+
+    # Merge the CSB data with the master offsets based on unique vessel ID
+    csb_corr1 = csb_corr.merge(master_offsets, left_on='unique_id', right_on='unique_id', how='left')
+
+    # Apply the offset correction
+    csb_corr1['depthfinal'] = csb_corr1['depth_new'] - csb_corr1['offset_value']
+    csb_corr1['depthfinal'] = csb_corr1['depthfinal'] * -1  
+
+    # try to drop some unneeded columns
+    csb_corr1 = csb_corr1.drop(columns=['s', 'f', 'q', 'DataProv', 'ControlS_2', 'ControlS_1', 'row_id', 'platform_name_y'], errors='ignore')
+    
+    print('*****Processed CSB data ready*****')
+    # Instead of immediately exporting to geopackage, return the processed GeoDataFrame.
+    return csb_corr1
+
+def rasterize_CSB():
+    csb_corr1 = draft_corr()
+    
+    # New: Based on GUI options, insert processed data into DuckDB.
+    if duckdb_option_var.get():
+        duckdb_path = os.path.join(output_dir, "csb.duckdb")
+        insert_into_duckdb(csb_corr1, duckdb_path)
+    
+    # Optionally export as geopackage if the checkbox is selected.
+    if export_gp_var.get():
+        gpkg_path = os.path.join(output_dir, 'csb_processed_'+ title +'.gpkg')
+        print('*****Exporting processed CSB data to geopackage*****')
+        csb_corr1.to_file(gpkg_path, driver='GPKG', layer='csb')
+        print(f"Geopackage exported to {gpkg_path}")
+    
+    return csb_corr1
 
 def reproject_tiff(input_dir, output_dir, target_epsg='EPSG:3395'):
     """
@@ -763,24 +860,6 @@ def derive_draft():
 
     return csb_corr
 
-def draft_corr():
-    csb_corr = derive_draft()
-    master_offsets = read_master_offsets()
-
-    # Merge the CSB data with the master offsets based on unique vessel ID
-    csb_corr1 = csb_corr.merge(master_offsets, left_on='unique_id', right_on='unique_id', how='left')
-
-    # Apply the offset correction
-    csb_corr1['depthfinal'] = csb_corr1['depth_new'] - csb_corr1['offset_value']
-    csb_corr1['depthfinal'] = csb_corr1['depthfinal'] * -1  
-    
-    # try to drop some unneeded columns
-    csb_corr1 = csb_corr1.drop(columns=['s', 'f', 'q', 'DataProv', 'ControlS_2', 'ControlS_1', 'row_id', 'platform_name_y'], errors='ignore')
-    
-    print('*****Exporting tide and vessel offset corrected CSB to geopackage*****')
-    csb_corr1.to_file(output_dir + '/csb_processed_'+ title +'.gpkg', driver='GPKG', layer = 'csb')
-    
-    return(csb_corr1)
 
 def reproject_to_mercator(geodataframe):
     # Reproject to EPSG:3395 (World Mercator)
@@ -902,14 +981,6 @@ def plot_vessel_tracks(gdf):
     plt.savefig(output_dir + '/csb_plot_' + title + '.png', dpi=300)
     plt.close()
     
-def rasterize_CSB():
-    csb_corr1 = draft_corr()
-    print('*****Rasterizing CSB data and exporting geotiff*****')
-    output_raster_path = output_dir + '/csb_processed_' + title + '.tif'
-    rasterize_with_rasterio(csb_corr1, output_raster_path, resolution)    
-    
-    # Call the new plot function
-    plot_vessel_tracks(csb_corr1)
     
 def open_file_dialog(var, file_types):
     filename = filedialog.askopenfilename(filetypes=file_types)
@@ -958,14 +1029,13 @@ def process_csb_for_directory(csb_directory):
             if bluetopo_var.get():
                 BAG_filepath = create_convex_hull_and_download_tiles(csb, output_dir, use_bluetopo=True)
                 print(f"Updated BAG_filepath (VRT): {BAG_filepath}")
-                # Optionally, you could set a flag or global variable to indicate automated mode.
             else:
                 # Use the user-provided BAG_filepath (local input)
                 BAG_filepath = BAG_filepath_var.get()
                 print(f"Using user-provided BAG_filepath: {BAG_filepath}")
             
             # Proceed with the rest of your processing (tide correction, etc.)
-            rasterize_CSB()  # This calls your function that uses BAG_filepath internally
+            rasterize_CSB()  # This now inserts into DuckDB and optionally exports geopackage
             
             # Clean up the Modeling directory and intermediate files if they exist
             try:
@@ -999,7 +1069,7 @@ def process_csb_for_directory(csb_directory):
         except Exception as e:
             print(f"An error occurred while processing {csb}: {e}")
 
-# Tkinter GUI setup
+
 root = tk.Tk()
 root.title("CSB Processing")
 
@@ -1008,6 +1078,10 @@ csb_var = tk.StringVar()
 BAG_filepath_var = tk.StringVar()
 fp_zones_var = tk.StringVar()
 output_dir_var = tk.StringVar()
+
+# New BooleanVars for additional options:
+duckdb_option_var = tk.BooleanVar(value=True)
+export_gp_var = tk.BooleanVar(value=True)
 
 tk.Label(root, text='2. Directory with Raw CSB data in *.csv format').grid(row=1, column=0, sticky='w')
 csb_dir_entry = tk.Entry(root, textvariable=csb_var)
@@ -1042,6 +1116,10 @@ def on_bluetopo_check():
         BAG_filepath_entry.config(state='normal')
 
 bluetopo_checkbox.config(command=on_bluetopo_check)
+
+# New checkboxes for the additional options:
+tk.Checkbutton(root, text="Insert into DuckDB", variable=duckdb_option_var).grid(row=7, column=0, sticky='w')
+tk.Checkbutton(root, text="Export Geopackage", variable=export_gp_var).grid(row=7, column=1, sticky='w')
 
 if __name__ == "__main__":
     root.mainloop()
