@@ -19,7 +19,7 @@ def ensure_grid_id_exists(gdf):
         print("GRID_ID field exists.")
     return gdf
 
-def process_tile(bbox, email, tile_name, output_directory):
+def process_tile(bbox, email, tile_name, output_directory, csb_filters=None):
     print(f"Processing GRID_ID {tile_name} with bbox: {bbox}")
     payload = {
         "email": email,
@@ -30,6 +30,9 @@ def process_tile(bbox, email, tile_name, output_directory):
             }
         ]
     }
+
+    if csb_filters:
+        payload["datasets"][0].update(csb_filters)
 
     # Submit the order
     response = requests.post('https://q81rej0j12.execute-api.us-east-1.amazonaws.com/order', json=payload)
@@ -50,7 +53,8 @@ def process_tile(bbox, email, tile_name, output_directory):
 
     # Wait for order completion; check order status and download CSV
     retry_count = 0
-    max_retries = 5
+    # max_retries = 5
+    max_retries = 20
     status = 'initialized'
     
     while status.lower() not in ['complete', 'error'] and retry_count < max_retries:
@@ -122,7 +126,25 @@ def csv_file_exists(tile_name, output_directory):
     return os.path.exists(csv_file_path)
 
 
-def main(input_polygon_path, output_directory, email):
+def main(input_polygon_path, output_directory, email, *, platforms=None,
+         providers=None, unique_id=None, archive_date=None, collection_date=None):
+    """Download CSB soundings with optional API filters.
+
+    platforms/providers: nonempty lists of names; unique_id: one platform ID.
+    archive_date/collection_date: dictionaries with optional inclusive 'start'
+    and 'end' dates (YYYY-MM-DD). None leaves a filter unset.
+    Use a separate output directory for each filter selection: existing tile
+    CSVs are skipped regardless of which filters produced them.
+    """
+    csb_filters = {
+        key: value for key, value in {
+            "platforms": platforms,
+            "providers": providers,
+            "unique_id": unique_id,
+            "archive_date": archive_date,
+            "collection_date": collection_date,
+        }.items() if value is not None
+    }
     gdf = gpd.read_file(input_polygon_path).to_crs(epsg=4326)
 
     # Ensure GRID_ID exists and is populated
@@ -143,11 +165,20 @@ def main(input_polygon_path, output_directory, email):
         print(bbox)  # Debugging print for the bounding box
 
         # Now call process_tile for each tile
-        process_tile(bbox, email, tile_name, output_directory)
+        process_tile(bbox, email, tile_name, output_directory, csb_filters)
 
 if __name__ == "__main__":
     input_polygon_path = r"D:\csb\raw\Southeast\Southeast.shp"  # Replace with your input polygon path
     output_directory = r"D:\csb\raw\Southeast_22OCT2024" # Replace with your output directory
     email = 'anthony.r.klemm@noaa.gov'  # Replace with your email
     
-    main(input_polygon_path, output_directory, email)
+    # Optional API filters; leave as None to include all matching data.
+    platforms = None       # Example: ["Carnival Paradise"]
+    providers = None       # Example: ["Carnival"]
+    unique_id = None       # One provider/platform identifier
+    archive_date = None    # Example: {"start": "2026-10-15", "end": "2026-11-02"}
+    collection_date = None # Example: {"start": "2024-01-01", "end": "2026-12-31"}
+
+    main(input_polygon_path, output_directory, email,
+         platforms=platforms, providers=providers, unique_id=unique_id,
+         archive_date=archive_date, collection_date=collection_date)
